@@ -10,7 +10,7 @@ What it leaves to you, by default, is the moment that matters most: initialising
 
 ```hcl
 module "openbao" {
-  source = "github.com/conn3xorg/circuit-openbao?ref=v0.1.0"
+  source = "github.com/conn3xorg/circuit-openbao?ref=v0.2.0"
 
   hosts                = { bao1 = "203.0.113.10" }
   ssh_private_key_file = "~/.ssh/id_ed25519"
@@ -37,7 +37,7 @@ To reach OpenBao from other machines, give it a certificate. The files must alre
 
 ```hcl
 module "openbao" {
-  source = "github.com/conn3xorg/circuit-openbao?ref=v0.1.0"
+  source = "github.com/conn3xorg/circuit-openbao?ref=v0.2.0"
 
   hosts                = { bao1 = "203.0.113.10" }
   ssh_private_key_file = "~/.ssh/id_ed25519"
@@ -95,7 +95,7 @@ With `seal`, OpenBao unseals itself on every start by asking something else to d
 
 ```hcl
 module "openbao" {
-  source = "github.com/conn3xorg/circuit-openbao?ref=v0.1.0"
+  source = "github.com/conn3xorg/circuit-openbao?ref=v0.2.0"
 
   hosts                = { bao1 = "203.0.113.10" }
   ssh_private_key_file = "~/.ssh/id_ed25519"
@@ -177,7 +177,7 @@ Set `openbao_version` and `checksums` together. The release's `checksums.txt` li
 
 ```hcl
 module "openbao" {
-  source = "github.com/conn3xorg/circuit-openbao?ref=v0.1.0"
+  source = "github.com/conn3xorg/circuit-openbao?ref=v0.2.0"
 
   hosts           = { bao1 = "203.0.113.10" }
   openbao_version = "2.7.2"
