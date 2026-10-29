@@ -116,3 +116,103 @@ jobs:
         if: always()
         working-directory: examples/local
         run: ./down.sh
+
+  # Auto-unseal with a transit seal, and self-initialisation. A second
+  # OpenBao in dev mode is the unsealer. It shares the host container's
+  # network, so the circuit's OpenBao reaches it on 127.0.0.1:8300.
+  e2e-seal:
+    needs: validate
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        distro: [rocky10, fedora45, ubuntu2404, debian13]
+    name: e2e-seal (${{ matrix.distro }})
+    # self_init sets up a KV engine, a policy, userpass and a user. The
+    # user's password comes from the environment file, with quotes, a
+    # dollar and a backslash in it to test the quoting.
+    env:
+      TF_VAR_seal: '{ type = "transit", config = { address = "http://127.0.0.1:8300", mount_path = "transit/", key_name = "openbao" } }'
+      TF_VAR_environment: '{ BAO_TOKEN = "ci-autounseal-token", CI_PASSWORD = "It''s a \"$3cr3t\" \\ <&>" }'
+      TF_VAR_self_init: >-
+        [{ name = "setup", requests = [
+        { name = "kv", operation = "update", path = "sys/mounts/secret", data = { type = "kv-v2" } },
+        { name = "policy", operation = "update", path = "sys/policies/acl/ci", data = { policy = "path \"secret/*\" { capabilities = [\"create\", \"read\", \"update\"] }" } },
+        { name = "userpass", operation = "update", path = "sys/auth/userpass", data = { type = "userpass" } },
+        { name = "user", operation = "update", path = "auth/userpass/users/ci", data = { token_policies = ["ci"], password = { eval_source = "env", eval_type = "string", env_var = "CI_PASSWORD" } } }
+        ] }]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: conn3xorg/conn3x
+          ref: main
+          path: conn3x
+          persist-credentials: false
+          sparse-checkout: test/images
+      - name: Install Conn3x
+        env: *gh
+        run: *install
+      - name: Start the ${{ matrix.distro }} host
+        working-directory: examples/local
+        env:
+          CONTAINERFILE: ${{ github.workspace }}/conn3x/test/images/${{ matrix.distro }}/Containerfile
+        run: ./up.sh
+      # The seal's token is an orphan that can only encrypt and decrypt
+      # with the one key, as OpenBao's transit seal docs advise.
+      - name: Start the unsealer
+        run: |
+          podman run -d --name openbao-unsealer --network container:circuit-openbao \
+            quay.io/openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f \
+            server -dev -dev-root-token-id=unsealer-root -dev-listen-address=127.0.0.1:8300
+          podman exec -i -e BAO_ADDR=http://127.0.0.1:8300 -e BAO_TOKEN=unsealer-root openbao-unsealer sh -eu <<'EOF'
+          for _ in $(seq 30); do bao status >/dev/null 2>&1 && break; sleep 1; done
+          bao secrets enable transit >/dev/null
+          bao write -f transit/keys/openbao >/dev/null
+          printf '%s\n' 'path "transit/encrypt/openbao" { capabilities = ["update"] }' 'path "transit/decrypt/openbao" { capabilities = ["update"] }' | bao policy write autounseal - >/dev/null
+          bao token create -id=ci-autounseal-token -orphan -period=24h -policy=autounseal >/dev/null
+          EOF
+      # Neither the seal's token nor the password may reach state.
+      - name: Apply with a transit seal and self_init, then plan again
+        working-directory: examples/local
+        run: |
+          conn3x init
+          conn3x apply -auto-approve
+          conn3x plan -detailed-exitcode
+          if grep -qF -e ci-autounseal-token -e 3cr3t terraform.tfstate; then exit 1; fi
+      # Nobody unseals it. It must come up unsealed, the user from
+      # self_init must log in and use the KV engine, and the same after a
+      # restart. No unseal key or root token is written down.
+      - name: Check it unsealed itself, log in, restart
+        run: |
+          podman exec -i circuit-openbao bash -eu <<'EOF'
+          export BAO_ADDR=http://127.0.0.1:8200
+          [ ! -e /root/openbao-init.json ]
+          [ "$(stat -c %a /etc/openbao/openbao.env)" = 600 ]
+          health() { curl -s -o /dev/null -w '%{http_code}' $BAO_ADDR/v1/sys/health; }
+          active() { for _ in $(seq 30); do [ "$(health)" = 200 ] && return 0; sleep 1; done; return 1; }
+          login() {
+            curl -sf -X POST --data-binary @- $BAO_ADDR/v1/auth/userpass/login/ci <<'JSON' | sed 's/.*"client_token":"\([^"]*\)".*/\1/'
+          {"password": "It's a \"$3cr3t\" \\ <&>"}
+          JSON
+          }
+          active
+          export BAO_TOKEN=$(login)
+          bao kv put secret/hello greeting=world >/dev/null
+          [ "$(bao kv get -field=greeting secret/hello)" = world ]
+          systemctl restart openbao
+          active
+          export BAO_TOKEN=$(login)
+          [ "$(bao kv get -field=greeting secret/hello)" = world ]
+          EOF
+      - name: Plan again after the restart
+        working-directory: examples/local
+        run: conn3x plan -detailed-exitcode
+      - name: Clean up
+        if: always()
+        working-directory: examples/local
+        run: |
+          podman rm -f openbao-unsealer || true
+          ./down.sh
