@@ -125,3 +125,58 @@ variable "initialize" {
   default     = false
   description = "Initialise OpenBao on the first apply with one unseal key, and write the key and root token to /root/openbao-init.json, mode 0600. For labs and homelabs only: the key sits on the same disk as the data it protects. When false, run bao operator init yourself."
 }
+
+variable "seal" {
+  type = object({
+    type   = string
+    config = optional(map(string), {})
+  })
+  default     = null
+  description = "Auto-unseal: a seal type, such as \"transit\" or \"awskms\", and its settings, written into a seal stanza in the config. The config and the plan show the settings, so pass tokens and credentials in environment instead. When null, OpenBao uses unseal keys."
+
+  validation {
+    condition     = var.seal == null || try(can(regex("^[a-z0-9_]+$", var.seal.type)) && alltrue([for k in keys(var.seal.config) : can(regex("^[a-z0-9_]+$", k))]), false)
+    error_message = "seal.type and the keys of seal.config must be lowercase names such as \"transit\" and \"key_name\"."
+  }
+}
+
+variable "environment" {
+  type        = map(string)
+  default     = null
+  ephemeral   = true
+  sensitive   = true
+  description = "Environment variables for the OpenBao server, such as BAO_TOKEN for a transit seal or a password a self_init request reads with eval_source = \"env\". Written to /etc/openbao/openbao.env, mode 0600; it never reaches state or the plan. Needs seal."
+
+  validation {
+    condition     = var.environment == null || try(alltrue([for k, v in var.environment : can(regex("^[A-Za-z_][A-Za-z0-9_]*$", k)) && !strcontains(v, "\n")]), false)
+    error_message = "environment maps variable names, such as BAO_TOKEN, to values on one line."
+  }
+
+  validation {
+    condition     = var.environment == null || var.seal != null
+    error_message = "environment is only used with seal."
+  }
+}
+
+variable "self_init" {
+  type        = any
+  default     = null
+  description = "OpenBao's self-initialisation: a list of initialize blocks, each with a name and a list of requests, each request with a name, operation and path and optionally data, token and allow_failure. They run once, in order, on the first start. Needs seal; not with initialize."
+
+  validation {
+    condition = var.self_init == null || try(alltrue([for b in var.self_init : can(regex("^[A-Za-z_][A-Za-z0-9_-]*$", b.name)) && length(b.requests) > 0 && alltrue([
+      for r in b.requests : can(regex("^[A-Za-z_][A-Za-z0-9_-]*$", r.name)) && can(tostring(r.operation)) && can(r.path) && alltrue([for k in keys(r) : can(regex("^[a-z_]+$", k))])
+    ])]), false)
+    error_message = "self_init is a list of { name, requests }, and each request has a name, an operation and a path. Names start with a letter or underscore and hold letters, digits, - and _."
+  }
+
+  validation {
+    condition     = var.self_init == null || var.seal != null
+    error_message = "self_init needs seal: OpenBao only initialises itself with auto-unseal."
+  }
+
+  validation {
+    condition     = var.self_init == null || !var.initialize
+    error_message = "Set self_init or initialize, not both."
+  }
+}
