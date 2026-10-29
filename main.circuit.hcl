@@ -26,6 +26,7 @@ locals {
   binary    = "${local.dir}/bao"
   config    = "/etc/openbao/openbao.hcl"
   init_file = "/root/openbao-init.json"
+  env_file  = "/etc/openbao/openbao.env"
 
   tls    = var.tls_cert_file != null
   scheme = local.tls ? "https" : "http"
@@ -68,6 +69,19 @@ locals {
     }
   EOT
   }
+
+  # The seal and self_init stanzas follow the rest, and only when set, so a
+  # config without them stays as it was.
+  seal_config = var.seal == null ? "" : "\nseal ${jsonencode(var.seal.type)} {\n${join("", [for k, v in var.seal.config : "  ${k} = ${jsonencode(v)}\n"])}}\n"
+
+  # OpenBao reads its config as HCL 1, which takes JSON's values but "="
+  # between a key and its value, so this swaps the colon after each key.
+  # A string can't hold an unescaped quote, so no colon inside one matches.
+  json_key = "/(\"(?:[^\"\\\\]|\\\\.)*\"):/"
+
+  self_init_config = join("", [for b in coalesce(var.self_init, []) : "\ninitialize ${jsonencode(b.name)} {\n${join("", [
+    for r in b.requests : "  request ${jsonencode(r.name)} {\n${join("", [for k, v in r : "    ${k} = ${replace(jsonencode(v), local.json_key, "$1=")}\n" if k != "name"])}  }\n"
+  ])}}\n"])
 }
 
 circuit "openbao" {
@@ -152,10 +166,24 @@ circuit "openbao" {
   step "config" {
     file {
       path    = local.config
-      content = local.config_content[each.key]
+      content = "${local.config_content[each.key]}${local.seal_config}${local.self_init_config}"
       owner   = "root"
       group   = "openbao"
       mode    = "0640"
+    }
+  }
+
+  # Seal credentials and anything self_init reads with eval_source = "env".
+  # systemd reads the file as root before it starts OpenBao. Write-only:
+  # the plan and state record only an HMAC of the content.
+  step "environment" {
+    for_each = var.seal == null ? [] : ["environment"]
+    file {
+      path       = local.env_file
+      content_wo = join("", [for k, v in coalesce(var.environment, {}) : "${k}=\"${replace(v, "/([\"\\\\$`])/", "\\$1")}\"\n"])
+      owner      = "root"
+      group      = "root"
+      mode       = "0600"
     }
   }
 
@@ -179,7 +207,7 @@ circuit "openbao" {
         Type=notify
         User=openbao
         Group=openbao
-        ProtectSystem=full
+        ${var.seal == null ? "" : "EnvironmentFile=${local.env_file}\n"}ProtectSystem=full
         ProtectHome=read-only
         PrivateTmp=yes
         PrivateDevices=yes
@@ -208,10 +236,11 @@ circuit "openbao" {
   step "restart" {
     command {
       command = "systemctl daemon-reload && systemctl restart openbao"
-      triggers = {
+      # The for keeps triggers the same object it was before seal existed.
+      triggers = merge({
         config = conn3x_file.openbao__config[each.key].revision
         unit   = conn3x_file.openbao__unit[each.key].revision
-      }
+      }, { for k in(var.seal == null ? [] : ["environment"]) : k => conn3x_file.openbao__environment["${each.key}/${k}"].revision })
     }
   }
 

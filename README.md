@@ -4,7 +4,7 @@ A Conn3x circuit that runs [OpenBao](https://openbao.org), the Linux Foundation'
 
 It downloads a pinned OpenBao release, checks its SHA-256, and runs `bao server` under systemd as its own `openbao` user, with integrated storage (raft) as a single node in `/var/lib/openbao`. It writes `/etc/openbao/openbao.hcl` from a handful of inputs and restarts OpenBao when that changes. Out of the box it listens only on `127.0.0.1:8200`, over plain HTTP. Any other address needs a certificate, and the plan refuses one without it.
 
-What it leaves to you, by default, is the moment that matters most: initialising OpenBao and holding its unseal keys. For a lab there's `initialize = true`, which does that for you and leaves the key on the host. Read [Initialising and unsealing](#initialising-and-unsealing) before you use it.
+What it leaves to you, by default, is the moment that matters most: initialising OpenBao and holding its unseal keys. For a lab there's `initialize = true`, which does that for you and leaves the key on the host. For anything else there's auto-unseal with `seal`, and `self_init` to have OpenBao initialise itself, with no unseal key or root token written down anywhere. Read [Initialising and unsealing](#initialising-and-unsealing) before you use either.
 
 ## Usage
 
@@ -87,7 +87,61 @@ bao operator unseal
 
 Then log in with the token from `root_token`, set up an auth method, and revoke the root token once you no longer need it.
 
-Auto-unseal, with a cloud KMS, a transit engine on another OpenBao or a PKCS#11 device, is out of scope. You can add a `seal` stanza to a copy of the circuit if you need it.
+### Auto-unseal and self-initialisation
+
+With `seal`, OpenBao unseals itself on every start by asking something else to decrypt its root key: the transit engine of another OpenBao, or a cloud KMS. Nobody types in unseal keys after a reboot. The circuit writes your `seal` into a `seal` stanza in the config, so it takes whatever settings [OpenBao's seal docs](https://openbao.org/docs/configuration/seal/) list for that type.
+
+`self_init` then has OpenBao initialise itself, once, on its first start, by running the requests you give it. It revokes the root token when it's done and makes no recovery keys, so there's nothing to write down and nothing that could leak. The auth methods, engines and policies you'd otherwise set up by hand go in the same place:
+
+```hcl
+module "openbao" {
+  source = "github.com/conn3xorg/circuit-openbao?ref=v0.1.0"
+
+  hosts                = { bao1 = "203.0.113.10" }
+  ssh_private_key_file = "~/.ssh/id_ed25519"
+
+  seal = {
+    type = "transit"
+    config = {
+      address    = "https://unsealer.example.com:8200"
+      mount_path = "transit/"
+      key_name   = "bao1"
+    }
+  }
+
+  environment = {
+    BAO_TOKEN      = var.unseal_token   # ephemeral = true in your own variables
+    ADMIN_PASSWORD = var.admin_password
+  }
+
+  self_init = [{
+    name = "setup"
+    requests = [
+      { name = "kv", operation = "update", path = "sys/mounts/secret", data = { type = "kv-v2" } },
+      { name = "userpass", operation = "update", path = "sys/auth/userpass", data = { type = "userpass" } },
+      {
+        name      = "admin"
+        operation = "update"
+        path      = "auth/userpass/users/admin"
+        data = {
+          token_policies = ["admin"]
+          password       = { eval_source = "env", eval_type = "string", env_var = "ADMIN_PASSWORD" }
+        }
+      },
+    ]
+  }]
+}
+```
+
+Each entry in `self_init` becomes an `initialize` block and each request a `request` block inside it, in the order you give them, with `operation`, `path`, `data`, `token` and `allow_failure` passed through as they are. [OpenBao's self-initialisation docs](https://openbao.org/docs/configuration/self-init/) cover what a request can do, including reading a value from the environment or a file, as the password above does. Without `seal` the plan refuses `self_init`, because OpenBao only initialises itself with auto-unseal, and it refuses `self_init` together with `initialize = true`.
+
+Anything in `seal` and `self_init` ends up in `/etc/openbao/openbao.hcl`, in the plan and in state, so keep tokens, credentials and passwords out of both. Put them in `environment` instead. It's an ephemeral input: the circuit writes it to `/etc/openbao/openbao.env`, owned by root with mode `0600`, which systemd hands to OpenBao when it starts it, and the plan and state hold only an HMAC of it. The transit seal reads its token from `BAO_TOKEN`; a cloud KMS seal reads its credentials from the variables its docs name; and a request reads anything else with `eval_source = "env"`. Pass `environment` on every plan and apply, as you would any ephemeral variable.
+
+Self-initialisation runs only on OpenBao's first start, against empty storage. Changing `self_init` afterwards rewrites the config and restarts OpenBao, and that's all: it doesn't run the requests again. From then on, change things with `bao` or your own tooling.
+
+The trade is worth saying plainly. With auto-unseal, whoever controls the unsealer controls this OpenBao: the transit key or KMS key can unseal it, and anyone who can use that key and copy the raft data can read every secret in it. Guard the unsealer at least as well as this host. For the transit seal, give OpenBao an orphan, periodic token that can only use `transit/encrypt/KEY` and `transit/decrypt/KEY`, as the [transit seal docs](https://openbao.org/docs/configuration/seal/transit/) advise, and keep the unsealer running: if it's gone, OpenBao can't unseal after a restart.
+
+Adding `seal` to a host that's already initialised with unseal keys starts a seal migration. Take a raft snapshot first, then unseal once more with `bao operator unseal -migrate` and your existing keys, which become its recovery keys. [OpenBao's seal concepts](https://openbao.org/docs/concepts/seal/) walk through it.
 
 ## What it does
 
@@ -97,9 +151,9 @@ On each host, in order:
 2. Creates the `openbao` system user, with home `/var/lib/openbao` and no login shell. That directory, mode `0700`, holds the raft database.
 3. Downloads `openbao_VERSION_linux_ARCH.tar.gz` from the GitHub release into `/opt/openbao/VERSION/` and unpacks the `bao` binary there. If the checksum doesn't match `checksums`, the apply fails and nothing is unpacked. The binary is static, so the same one runs on every distribution.
 4. Links `/usr/local/bin/bao` to it, so the CLI is on the PATH.
-5. Writes `/etc/openbao/openbao.hcl`, owned by `root:openbao` with mode `0640`, and `/etc/systemd/system/openbao.service`. A change to either restarts OpenBao, which seals it.
+5. Writes `/etc/openbao/openbao.hcl`, owned by `root:openbao` with mode `0640`, and `/etc/systemd/system/openbao.service`. With `seal`, it also writes `/etc/openbao/openbao.env`, owned by root with mode `0600`, and points the unit at it. A change to any of them restarts OpenBao, which seals it, unless `seal` unseals it again.
 6. Starts OpenBao now and at boot, and waits until `/v1/sys/health` answers.
-7. With `initialize = true`, initialises it once, as above.
+7. With `initialize = true`, initialises it once, as above. With `self_init`, OpenBao does that itself on this first start.
 
 The config sets `api_addr` and `cluster_addr` to `listen_address`, or to the host's own address when `listen_address` is `0.0.0.0` or `::`. The cluster port is the next one after `api_port`.
 
@@ -109,11 +163,11 @@ Before the circuit runs, the `conn3x_host` data source reads each host's archite
 
 ### What it doesn't do
 
-- It doesn't unseal OpenBao, ever. With the default it doesn't initialise it either.
+- It never runs `bao operator unseal`. With `seal`, OpenBao unseals itself; without it, that's up to you. With the default it doesn't initialise OpenBao either.
 - It doesn't make or renew certificates. Point `tls_cert_file` and `tls_key_file` at files something else keeps up to date. A renewed certificate needs a `systemctl reload openbao` to take effect.
 - It doesn't join hosts into a raft cluster. Each host is a single node of its own.
 - It doesn't open a firewall port. Open `api_port` with [circuit-firewall](https://github.com/conn3xorg/circuit-firewall) or a step of your own.
-- It doesn't configure secrets engines, auth methods or policies. Do that with `bao` once it's unsealed.
+- It doesn't configure secrets engines, auth methods or policies after the first start. `self_init` sets them up once; after that, use `bao`.
 - It doesn't take backups. `bao operator raft snapshot save` takes one; copying it somewhere safe is up to you.
 - Deleting the module leaves OpenBao installed and running, with its data.
 
@@ -154,6 +208,9 @@ The new release unpacks beside the old one, the unit points at it, and OpenBao r
 | `tls_key_file` | string | `null` | Path on the host of the listener's private key in PEM. Set it together with `tls_cert_file`. |
 | `ui` | bool | `true` | Serve the web UI at `/ui`. |
 | `initialize` | bool | `false` | Initialise OpenBao on the first apply with a single unseal key, and write the key and root token to `/root/openbao-init.json`, mode `0600`. Labs and homelabs only; see above. |
+| `seal` | object | `null` | Auto-unseal: `{ type = "transit", config = { ... } }`, written into a `seal` stanza. The settings are in the plan and state, so pass tokens and credentials in `environment`. When null, OpenBao uses unseal keys. |
+| `environment` | map(string) | `null` | Ephemeral. Environment variables for OpenBao, written to `/etc/openbao/openbao.env`, mode `0600`, and kept out of the plan and state. For the seal's token or credentials, and values `self_init` reads with `eval_source = "env"`. Needs `seal`. |
+| `self_init` | any | `null` | A list of `{ name, requests }`, each request a `{ name, operation, path }` with optional `data`, `token` and `allow_failure`, written as `initialize` and `request` blocks. OpenBao runs them once on its first start. Needs `seal`; not with `initialize`. |
 
 ## Outputs
 
@@ -171,6 +228,8 @@ Requires Conn3x v0.6.5 or later, systemd on each host, and outbound HTTPS to git
 Rocky Linux 10, Fedora 45, Ubuntu 24.04 and Debian 13, with OpenBao 2.7.2. CI applies [examples/local](examples/local) to each on amd64 and checks that the second plan has no changes and that the uninitialised server answers `/v1/sys/health` with `501`. It then applies again with `initialize = true`, unseals with the key from `/root/openbao-init.json`, enables a KV v2 engine and writes and reads a secret with the root token, restarts OpenBao, checks that it came back sealed, unseals it and reads the secret again, and checks that the plan is still clean. The same ran by hand on arm64, along with a switch to `listen_address = "0.0.0.0"` with a self-signed certificate on Fedora 45.
 
 The same checks passed on an Ubuntu 24.04 droplet and a Rocky Linux 10 droplet with SELinux enforcing, both with 1 vCPU and 1 GB of memory. After a reboot each came back sealed, unsealed with the key from the file, still had the secret, and the plan had no changes. On Rocky Linux OpenBao runs as `unconfined_service_t`, and the audit log had no denials. On the Ubuntu droplet, a switch to `listen_address = "0.0.0.0"` with a self-signed certificate answered from another machine over HTTPS, checked with `curl --cacert`.
+
+A second CI job applies [examples/local](examples/local) to each distribution with a transit seal against another OpenBao in dev mode, and a `self_init` that enables KV v2, writes a policy, enables userpass and adds a user whose password comes from `environment`. It checks that OpenBao comes up unsealed without anyone unsealing it, that the user can log in and write and read a secret, that it comes back unsealed after a restart, that there's no `/root/openbao-init.json`, that neither the seal's token nor the password is in state, and that the plan stays clean. That job also ran by hand on arm64 on Rocky Linux 10. Only the transit seal is tested; the cloud KMS seals take the same shape of input, but haven't been run here.
 
 ## License
 
