@@ -93,7 +93,7 @@ jobs:
           podman exec -d circuit-openbao sh -c 'cd /tmp && exec runuser -u nobody -- python3 /tmp/listener.py 8200 /tmp/listener.log'
           sleep 3
           if out=$(conn3x apply -auto-approve -no-color 2>&1); then exit 1; fi
-          printf '%s\n' "$out" | grep -q "isn't held by OpenBao"
+          printf '%s\n' "$out" | grep -q "exit status 1: Port 8200 isn't held by OpenBao"
           podman exec circuit-openbao sh -ec '
             [ ! -e /root/openbao-init.json ]
             if grep -q PUT /tmp/listener.log; then exit 1; fi
@@ -102,8 +102,8 @@ jobs:
             systemctl daemon-reload
             sleep 3
             systemctl restart openbao
-            # Lets the unit's 60-second start limit pass, for the restart further down.
-            sleep 61
+            # The restarts in this check should not count towards the start limit later on.
+            systemctl reset-failed openbao
           '
       - name: Initialise, then plan again with no changes
         working-directory: examples/local
