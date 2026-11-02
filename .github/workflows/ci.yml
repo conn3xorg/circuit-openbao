@@ -74,6 +74,37 @@ jobs:
       - name: Check OpenBao is up and uninitialised
         run: |
           [ "$(podman exec circuit-openbao curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8200/v1/sys/health)" = 501 ]
+      # The unit stays active with nothing listening, so the apply reaches the
+      # init step while another process holds the port.
+      - name: Another process on the port isn't initialised
+        working-directory: examples/local
+        env:
+          TF_VAR_initialize: "true"
+        run: |
+          podman cp ../../test/listener.py circuit-openbao:/tmp/listener.py
+          podman exec circuit-openbao sh -ec '
+            command -v python3 >/dev/null || { apt-get -qq update && apt-get -qq install -y python3 || dnf -q install -y python3; } >/dev/null
+            install -d /etc/systemd/system/openbao.service.d
+            printf "[Service]\nType=simple\nExecStart=\nExecStart=/bin/sleep infinity\n" > /etc/systemd/system/openbao.service.d/ci.conf
+            systemctl daemon-reload
+            systemctl restart openbao
+            install -m 666 /dev/null /tmp/listener.log
+          '
+          podman exec -d circuit-openbao sh -c 'cd /tmp && exec runuser -u nobody -- python3 /tmp/listener.py 8200 /tmp/listener.log'
+          sleep 3
+          if out=$(conn3x apply -auto-approve -no-color 2>&1); then exit 1; fi
+          printf '%s\n' "$out" | grep -q "exit status 1: Port 8200 isn't held by OpenBao"
+          podman exec circuit-openbao sh -ec '
+            [ ! -e /root/openbao-init.json ]
+            if grep -q PUT /tmp/listener.log; then exit 1; fi
+            pkill -u nobody python3
+            rm -rf /etc/systemd/system/openbao.service.d
+            systemctl daemon-reload
+            sleep 3
+            systemctl restart openbao
+            # The restarts in this check should not count towards the start limit later on.
+            systemctl reset-failed openbao
+          '
       - name: Initialise, then plan again with no changes
         working-directory: examples/local
         env:
@@ -81,6 +112,9 @@ jobs:
         run: |
           conn3x apply -auto-approve
           conn3x plan -detailed-exitcode
+      - name: The certificate is checked when initialising
+        run: |
+          if grep -E 'BAO_SKIP_VERIFY' main.circuit.hcl; then exit 1; fi
       # Unseals with the key from the init file, writes and reads a secret
       # with the root token, then restarts: OpenBao must come back sealed,
       # and unseal again with the secret still there.
