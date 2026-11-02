@@ -102,8 +102,8 @@ jobs:
             systemctl daemon-reload
             sleep 3
             systemctl restart openbao
-            # These restarts don't count towards the unit's start limit in the steps below.
-            systemctl reset-failed openbao
+            # Lets the unit's 60-second start limit pass, for the restart further down.
+            sleep 61
           '
       - name: Initialise, then plan again with no changes
         working-directory: examples/local
