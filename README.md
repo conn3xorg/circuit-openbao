@@ -79,6 +79,8 @@ bao operator init -key-shares=1 -key-threshold=1 -format=json
 
 and writes the output to `/root/openbao-init.json`, mode `0600`. It holds one unseal key and the root token. The key and token stay on the host; Conn3x's plan and state record only that the command ran. If the file already exists, or OpenBao says it's already initialised, the circuit leaves it alone, so turning `initialize` on for a host you set up by hand changes nothing.
 
+The answer is only kept when root or the `openbao` user holds the API port, which narrows the window rather than closing it, since OpenBao could stop between the check and the request. With `tls_cert_file` the step also checks the listener's certificate against that file, under the first name in it, and that closes it. It needs `openssl` on the host, which the circuit installs.
+
 OpenBao still starts sealed. To unseal it after a reboot, run this and paste the key from `unseal_keys_b64` when it asks:
 
 ```sh

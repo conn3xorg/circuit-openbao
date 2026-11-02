@@ -40,11 +40,13 @@ locals {
   local_host = lookup({ "0.0.0.0" = "127.0.0.1", "::" = "[::1]" }, var.listen_address, strcontains(var.listen_address, ":") ? "[${var.listen_address}]" : var.listen_address)
   local_url  = "${local.scheme}://${local.local_host}:${var.api_port}"
 
-  # The circuit talks to OpenBao over loopback, which a certificate for the
-  # host's own name doesn't cover, so its checks skip verification. Nothing
-  # but the host itself is on the other end.
+  # The health checks reach OpenBao over loopback, which a certificate for the
+  # host's own name doesn't cover, so they skip verification. They carry
+  # nothing and only decide whether to wait.
   curl = local.tls ? "curl -sk" : "curl -s"
-  bao  = "BAO_ADDR=${local.local_url}${local.tls ? " BAO_SKIP_VERIFY=true" : ""} ${local.binary}"
+  # The init step keeps what it gets back, so it checks the listener's
+  # certificate, under the first name in it.
+  bao = "BAO_ADDR=${local.local_url}${local.tls ? " BAO_CACERT='${var.tls_cert_file}' BAO_TLS_SERVER_NAME=\"$name\"" : ""} ${local.binary}"
 
   # The address other nodes and clients are told to use: the host's own
   # address when OpenBao listens on every address.
@@ -97,7 +99,7 @@ circuit "openbao" {
 
   # Minimal images can lack any of these.
   step "tools" {
-    for_each = toset(["curl", "tar", "gzip"])
+    for_each = toset(concat(["curl", "tar", "gzip"], local.tls ? ["openssl"] : []))
     package {
       name = item.value
     }
@@ -266,11 +268,21 @@ circuit "openbao" {
 
   # Runs once. The unseal key and root token go to a root-only file on the
   # host and never into the plan or state. A host someone has already
-  # initialised by hand is left alone.
+  # initialised by hand is left alone. Only an answer from a port held by root
+  # or the openbao user is kept. That narrows the window, since OpenBao could
+  # stop between the check and the request. With TLS, the certificate closes it.
   step "init" {
     for_each = var.initialize ? ["init"] : []
     command {
-      command = "umask 077 && ${local.bao} operator init -key-shares=1 -key-threshold=1 -format=json > ${local.init_file}.new && mv ${local.init_file}.new ${local.init_file}"
+      command = <<-EOT
+        set -e
+        umask 077
+        p=$(printf ':%04X$' ${var.api_port}); u=$(id -u openbao)
+        cat /proc/net/tcp /proc/net/tcp6 2>/dev/null | awk -v p="$p" -v u="$u" '$4 == "0A" && $2 ~ p { n++; if ($8 != u && $8 != 0) b = 1 } END { exit !(n && !b) }' || { echo "Port ${var.api_port} isn't held by OpenBao, so it wasn't initialised." >&2; exit 1; }
+        ${local.tls ? "name=$(openssl x509 -in '${var.tls_cert_file}' -noout -ext subjectAltName | sed -n 's/^ *//; s/^\\(DNS\\|IP Address\\):\\([^,]*\\).*/\\2/p' | sed 's/^\\*\\./x./' | head -n 1)" : ""}
+        ${local.bao} operator init -key-shares=1 -key-threshold=1 -format=json > ${local.init_file}.new
+        mv ${local.init_file}.new ${local.init_file}
+      EOT
       unless  = "[ -s ${local.init_file} ] || ${local.curl} ${local.local_url}/v1/sys/init | grep -q '\"initialized\":true'"
     }
   }
