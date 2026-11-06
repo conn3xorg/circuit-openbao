@@ -124,6 +124,15 @@ circuit "openbao" {
     }
   }
 
+  # mkdir would make /opt/openbao with the login session's umask, and under
+  # circuit-hardening's 027 the openbao user couldn't reach its binary.
+  step "opt_dir" {
+    directory {
+      path = "/opt/openbao"
+      mode = "0755"
+    }
+  }
+
   step "release_dir" {
     directory {
       path = local.dir
