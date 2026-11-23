@@ -245,8 +245,8 @@ circuit "openbao" {
   # would come after the steps below, so they find OpenBao running with
   # the new settings. On a first apply it's what starts it.
   step "restart" {
-    command {
-      command = "systemctl daemon-reload && systemctl restart openbao"
+    service_action {
+      name = "openbao"
       # The for keeps triggers the same object it was before seal existed.
       triggers = merge({
         config = conn3x_file.openbao__config[each.key].revision
@@ -270,7 +270,7 @@ circuit "openbao" {
       command = "for _ in $(seq 60); do ${local.curl} -o /dev/null ${local.local_url}/v1/sys/health && exit 0; sleep 1; done; exit 1"
       unless  = "${local.curl} -o /dev/null ${local.local_url}/v1/sys/health"
       triggers = {
-        restart = conn3x_command.openbao__restart[each.key].revision
+        restart = conn3x_service_action.openbao__restart[each.key].revision
       }
     }
   }
