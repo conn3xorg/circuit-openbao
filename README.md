@@ -225,7 +225,7 @@ The new release unpacks beside the old one, the unit points at it, and OpenBao r
 
 ## Requirements
 
-Requires Conn3x v0.6.5 or later, systemd on each host, and outbound HTTPS to github.com. In a container, systemd needs `CAP_SYS_ADMIN` to give OpenBao the private `/dev` its unit asks for; [examples/local](examples/local) adds it.
+Requires Conn3x v0.28.0 or later, systemd on each host, and outbound HTTPS to github.com. In a container, systemd needs `CAP_SYS_ADMIN` to give OpenBao the private `/dev` its unit asks for; [examples/local](examples/local) adds it.
 
 ## Tested on
 
