@@ -199,7 +199,7 @@ jobs:
       - name: Start the unsealer
         run: |
           podman run -d --name openbao-unsealer --network container:circuit-openbao \
-            quay.io/openbao/openbao:2.7.2@sha256:5046911075e137e154ce49ab051502f4ec7cf367d484ae4a4dce665d9b90561f \
+            quay.io/openbao/openbao:2.7.3@sha256:ba4b133eb9586630024e71a617e66f37f29cc3534cdd46a6233e098ceded8dc9 \
             server -dev -dev-root-token-id=unsealer-root -dev-listen-address=127.0.0.1:8300
           podman exec -i -e BAO_ADDR=http://127.0.0.1:8300 -e BAO_TOKEN=unsealer-root openbao-unsealer sh -eu <<'EOF'
           for _ in $(seq 30); do bao status >/dev/null 2>&1 && break; sleep 1; done
