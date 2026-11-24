@@ -35,12 +35,12 @@ variable "ssh_become" {
 
 variable "openbao_version" {
   type        = string
-  default     = "2.7.2"
+  default     = "2.7.3"
   description = "OpenBao release to install, without the leading v."
 
   validation {
     condition     = can(regex("^[0-9]+\\.[0-9]+\\.[0-9]+$", var.openbao_version))
-    error_message = "openbao_version must be a release number such as \"2.7.2\", without the leading v."
+    error_message = "openbao_version must be a release number such as \"2.7.3\", without the leading v."
   }
 }
 
@@ -48,8 +48,8 @@ variable "checksums" {
   type        = map(string)
   description = "SHA-256 of the linux_amd64 and linux_arm64 release tarballs, keyed x86_64 and aarch64, from the release's checksums.txt. Change these with openbao_version."
   default = {
-    x86_64  = "582b1f3c2fdc5afd443b2d57a225ef654de75adea609fdb66731fd582a9cbc96"
-    aarch64 = "5b97bf816fa820e5e521abec1db19c6161fcca2f666cf4a84e335089c0e83edd"
+    x86_64  = "131df9a21cf3dd2dff47107110b369c9974cbdaa482bcbc723b81b3403c68ecd"
+    aarch64 = "b505b07af4206fdf0e81b747fcb7e9e63f2c2b05e26ead973cce62d0ed07d0e0"
   }
 
   validation {
